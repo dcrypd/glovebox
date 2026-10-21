@@ -1,0 +1,74 @@
+{
+  "id": "./",
+  "name": "Glovebox",
+  "short_name": "Glovebox",
+  "description": "A simple, modern, self-hosted vehicle log: fuel, service records and reminders.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f4f3ef",
+  "theme_color": "#f4f3ef",
+  "categories": [
+    "utilities",
+    "productivity"
+  ],
+  "icons": [
+    {
+      "src": "icons/amber-light/icon-192-rounded.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/amber-light/icon-512-rounded.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/amber-light/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Add fill-up",
+      "short_name": "Fuel",
+      "url": "./#/fuel",
+      "icons": [
+        {
+          "src": "icons/amber-light/icon-192-rounded.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Service records",
+      "short_name": "Service",
+      "url": "./#/service",
+      "icons": [
+        {
+          "src": "icons/amber-light/icon-192-rounded.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Reminders",
+      "short_name": "Reminders",
+      "url": "./#/reminders",
+      "icons": [
+        {
+          "src": "icons/amber-light/icon-192-rounded.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    }
+  ]
+}

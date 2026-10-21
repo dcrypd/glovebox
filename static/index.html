@@ -1,0 +1,102 @@
+<!--
+  Glovebox app shell. The body is intentionally minimal: a topbar with the
+  vehicle selector, a nav with five tabs, and #view which app.js swaps the
+  current page into. Everything else (Dashboard, Fuel, Records, Reminders,
+  Settings) is rendered client-side from /api responses — no server-side
+  templating, no build step.
+
+  The themed icons (favicon, apple-touch-icon, manifest) are picked by the
+  inline script below *before* app.js loads so the first paint already has
+  the right theme + accent. app.js then keeps them in sync on changes.
+-->
+<!doctype html>
+<html lang="en" data-accent="blue">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" id="theme-color-light" media="(prefers-color-scheme: light)" content="#f4f3ef">
+  <meta name="theme-color" id="theme-color-dark" media="(prefers-color-scheme: dark)" content="#141413">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Glovebox">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="manifest" id="app-manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" id="apple-touch-icon" href="icons/blue-dark/apple-touch-icon.png">
+  <meta name="description" content="Glovebox — a simple, modern self-hosted vehicle log. Track fuel, service records and reminders.">
+  <title>Glovebox</title>
+  <link rel="icon" id="favicon" type="image/png" href="icons/blue-dark/icon-192-rounded.png">
+  <script>
+    /* Pick the right themed icons immediately (before app.js loads) so the
+       favicon / touch icon / manifest match the theme + accent on first paint.
+       Without this, the browser would show the default blue-dark icons for a
+       frame, then flip to the user's choice once app.js runs — a visible
+       flash on every page load. The try/catch silently falls back to the
+       default if localStorage is unavailable (private mode, etc.). */
+    (function () {
+      try {
+        var t = localStorage.getItem('glovebox-theme');
+        var a = localStorage.getItem('glovebox-accent') || 'blue';
+        var dark = t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+        var th = dark ? 'dark' : 'light', f = a + '-' + th, d = document;
+        d.documentElement.setAttribute('data-theme', th);
+        d.documentElement.setAttribute('data-accent', a);
+        d.getElementById('favicon').href = 'icons/' + f + '/icon-192-rounded.png';
+        d.getElementById('apple-touch-icon').href = 'icons/' + f + '/apple-touch-icon.png';
+        d.getElementById('app-manifest').href = 'manifest-' + f + '.webmanifest';
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="preload" href="fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand" aria-label="Glovebox">
+        <img class="brand-mark" data-app-icon src="icons/blue-dark/icon-192.png" width="30" height="30" alt="" aria-hidden="true">
+        <span class="brand-name">Glovebox</span>
+      </div>
+      <div class="topbar-actions">
+        <label class="sr-only" for="vehicle-select">Vehicle</label>
+        <select id="vehicle-select" class="vehicle-select" aria-label="Select vehicle"></select>
+        <button class="icon-btn" id="theme-toggle" aria-label="Switch to light mode" title="Toggle theme">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+      </div>
+    </div>
+    <nav class="tabs" id="tabs" aria-label="Sections">
+      <!-- Hash-based routing: each tab is an anchor to #/<view>. app.js route()
+           reads location.hash on hashchange and re-renders. The Fuel tab has
+           id="tab-fuel" so updateNavLabels() can swap its text to "Energy"
+           when the selected vehicle is an EV. The route name stays "fuel"
+           regardless — only the user-visible label changes. -->
+      <a href="#/dashboard" data-view="dashboard" class="tab">Dashboard</a>
+      <a href="#/fuel" data-view="fuel" class="tab" id="tab-fuel">Fuel</a>
+      <a href="#/service" data-view="service" class="tab">Records</a>
+      <a href="#/reminders" data-view="reminders" class="tab">Reminders</a>
+      <a href="#/settings" data-view="settings" class="tab">Settings</a>
+    </nav>
+  </header>
+
+  <main id="main" class="main">
+    <div id="view" class="view"></div>
+  </main>
+
+  <!-- Empty containers app.js fills in. modal-root holds one or two
+       overlays (the active modal + an optional QR preview stacked on top);
+       toast-root holds transient success/error messages. -->
+  <div id="modal-root"></div>
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+
+  <!-- The preview deployment injects a real proxy base here; the shipped
+       source keeps the placeholder token, which app.js falls back to
+       same-origin when it sees it (so the app works at any LAN hostname). -->
+  <script>window.GLOVEBOX_API_BASE = '__PORT_8000__';</script>
+  <script src="js/app.js" defer></script>
+</body>
+</html>

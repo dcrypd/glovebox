@@ -1,0 +1,14 @@
+services:
+  glovebox:
+    build: .
+    container_name: glovebox
+    restart: unless-stopped
+    # Binds to localhost only. Change to "8080:8000" if you want LAN access,
+    # and put it behind an authenticated reverse proxy if you expose it further.
+    ports:
+      - "127.0.0.1:8080:8000"
+    volumes:
+      - glovebox_data:/data
+
+volumes:
+  glovebox_data:
