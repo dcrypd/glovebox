@@ -109,6 +109,35 @@ MIGRATIONS: list[str] = [
         updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     );
     """,
+    # 6 — attachments for fuel/service entries (receipts, photos, PDFs, …)
+    # Files live on disk under <data>/attachments/ (a sibling of the SQLite DB,
+    # so in Docker they share the persistent /data volume and survive restarts
+    # and container rebuilds). This row holds the metadata: the original
+    # filename (for display), the on-disk stored_name (a uuid + extension so
+    # same-name uploads don't collide and the original filename never touches
+    # the filesystem), mime_type and size_bytes.
+    #
+    # entry_type ('fuel' | 'service') + entry_id form a polymorphic reference
+    # to either fuel_entries or service_entries — there's no FK because a single
+    # column can't reference two tables. Cascade cleanup is handled explicitly
+    # in the fuel/service/vehicle delete routes (see app/main.py), which delete
+    # the on-disk file alongside the row. vehicle_id IS a real FK with ON DELETE
+    # CASCADE as a backstop, but the delete-vehicle route still purges the files
+    # before the cascade removes the rows.
+    """
+    CREATE TABLE attachments (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        vehicle_id  INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+        entry_type  TEXT    NOT NULL,
+        entry_id    INTEGER NOT NULL,
+        filename    TEXT    NOT NULL,
+        stored_name TEXT    NOT NULL,
+        mime_type   TEXT,
+        size_bytes  INTEGER,
+        created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );
+    CREATE INDEX idx_attachments_entry ON attachments(entry_type, entry_id);
+    """,
 ]
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"

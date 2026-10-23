@@ -8,14 +8,16 @@ from __future__ import annotations
 import calendar
 import csv
 import io
+import mimetypes
 import os
+import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .db import Database
@@ -38,8 +40,13 @@ from .models import (
 
 DB_PATH = os.environ.get("GLOVEBOX_DB", str(Path(__file__).resolve().parent.parent / "data" / "Glovebox.db"))
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+# Attachments are stored on disk in a sibling directory of the SQLite DB, so in
+# Docker they share the persistent /data volume (and survive container rebuilds),
+# and locally they land in ./data/attachments/. The directory is created lazily
+# on first upload / first file access (see _attachments_dir()).
+ATTACH_DIR = Path(DB_PATH).resolve().parent / "attachments"
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 app = FastAPI(title="Glovebox", version=__version__, docs_url=None, redoc_url=None)
 db = Database(DB_PATH)
@@ -107,13 +114,15 @@ def get_vehicle_raw(vid: int):
     return r
 
 
-def row_fuel(r, vehicle, stats) -> dict:
+def row_fuel(r, vehicle, stats, attach_counts=None) -> dict:
     """Serialize one fuel/charge row for the API.
 
     `vehicle` is the raw vehicle row (for fuel_unit / currency). `stats` is
     the FuelStats computed over the whole entry list — we use it to look up
     the per-row economy (only the closing entry of each interval has one)
-    and the suspect flag.
+    and the suspect flag. `attach_counts` (optional) is a {entry_id: count}
+    map so the Fuel table can show a paperclip badge without an N+1 query
+    per row; absent means 0.
     """
     minor_unit = QUANTITY_PER_UNIT[vehicle["fuel_unit"]]
     entry = {
@@ -137,6 +146,10 @@ def row_fuel(r, vehicle, stats) -> dict:
             if r["quantity_minor"]
             else None
         ),
+        # Number of files attached to this entry (for the paperclip badge).
+        # fuel_payload() fetches all counts for the vehicle in one query and
+        # passes the map in, so this is O(1) per row.
+        "attachment_count": (attach_counts or {}).get(r["id"], 0),
     }
     # Only attach `economy` to the closing entry of each interval — partial
     # fills and the baseline full tank have no economy figure.
@@ -168,7 +181,8 @@ def fuel_payload(vid: int) -> dict:
     vehicle = get_vehicle_raw(vid)
     rows = fuel_entries_for(vid)
     stats = compute_fuel_stats([dict(r) for r in rows], vehicle["fuel_unit"])
-    entries = [row_fuel(r, vehicle, stats) for r in reversed(rows)]
+    acounts = attachment_counts_for(vid, "fuel")
+    entries = [row_fuel(r, vehicle, stats, acounts) for r in reversed(rows)]
     avg = stats.avg_economy(vehicle["fuel_unit"])
     cpd = stats.cost_per_distance()
     summary = {
@@ -199,7 +213,7 @@ def fuel_payload(vid: int) -> dict:
     }
 
 
-def row_service(r, vehicle) -> dict:
+def row_service(r, vehicle, attach_counts=None) -> dict:
     return {
         "id": r["id"],
         "date": r["date"],
@@ -208,6 +222,10 @@ def row_service(r, vehicle) -> dict:
         "category": r["category"],
         "cost": (r["cost_cents"] / 100) if r["cost_cents"] is not None else None,
         "notes": r["notes"],
+        # Number of files attached to this record (for the paperclip badge).
+        # list_service() fetches all counts for the vehicle in one query; the
+        # PDF/CSV export call sites pass None (0), since they don't render it.
+        "attachment_count": (attach_counts or {}).get(r["id"], 0),
     }
 
 
@@ -364,6 +382,11 @@ def update_vehicle(vid: int, body: VehiclePatch):
 @app.delete("/api/vehicles/{vid}")
 def delete_vehicle(vid: int):
     get_vehicle_raw(vid)
+    # Purge every attachment file for this vehicle before the vehicle row (and
+    # its cascaded fuel/service/reminder/attachment rows) go away. The ON
+    # DELETE CASCADE on attachments.vehicle_id removes the rows, but it can't
+    # unlink the files on disk — so we do that explicitly here.
+    delete_attachments_for_vehicle(vid)
     db.execute("DELETE FROM vehicles WHERE id=?", (vid,))
     return {"deleted": vid}
 
@@ -431,6 +454,10 @@ def delete_fuel(fid: int):
     r = db.one("SELECT * FROM fuel_entries WHERE id=?", (fid,))
     if r is None:
         raise HTTPException(404, "entry not found")
+    # Drop this entry's attachments (rows + on-disk files) before the entry row
+    # goes away — there's no FK from attachments.entry_id to fuel_entries, so
+    # the cleanup is explicit.
+    delete_attachments_for("fuel", fid)
     db.execute("DELETE FROM fuel_entries WHERE id=?", (fid,))
     return {"deleted": fid}
 
@@ -445,7 +472,11 @@ def list_service(vid: int):
     rows = db.query(
         "SELECT * FROM service_entries WHERE vehicle_id=? ORDER BY date DESC, id DESC", (vid,)
     )
-    return [row_service(r, None) for r in rows]
+    # Fetch attachment counts for every service record of this vehicle in one
+    # query, so the Records table can show a paperclip badge per row without
+    # an N+1 follow-up.
+    acounts = attachment_counts_for(vid, "service")
+    return [row_service(r, None, acounts) for r in rows]
 
 
 @app.post("/api/vehicles/{vid}/service", status_code=201)
@@ -491,6 +522,9 @@ def delete_service(sid: int):
     r = db.one("SELECT * FROM service_entries WHERE id=?", (sid,))
     if r is None:
         raise HTTPException(404, "entry not found")
+    # Drop this record's attachments (rows + on-disk files) before the row goes
+    # away — same explicit-cleanup reason as delete_fuel.
+    delete_attachments_for("service", sid)
     db.execute("DELETE FROM service_entries WHERE id=?", (sid,))
     return {"deleted": sid}
 
@@ -1007,6 +1041,234 @@ def qr_code(request: Request, url: str = Query(..., min_length=1, max_length=204
             "Content-Disposition": 'inline; filename="glovebox-quick-log.png"',
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Attachments (per-entry file uploads: receipts, photos, PDFs, …)
+# ---------------------------------------------------------------------------
+# Files are stored on disk under <data>/attachments/ (ATTACH_DIR, a sibling of
+# the SQLite DB). In Docker that shares the persistent /data volume, so uploads
+# survive restarts and container rebuilds; locally they land in ./data/attachments/.
+#
+# The DB row holds the original filename (for display), the on-disk stored_name
+# (a uuid + original extension so same-name uploads don't collide and the user's
+# filename never touches the filesystem), the mime type and the byte size.
+#
+# entry_type ('fuel' | 'service') + entry_id form a polymorphic reference to
+# either fuel_entries or service_entries (no FK — one column can't reference two
+# tables). Cascade cleanup is handled explicitly in the fuel/service/vehicle
+# delete routes above (delete_attachments_for / delete_attachments_for_vehicle),
+# which unlink the file alongside the row.
+
+ALLOWED_MIME = {
+    "image/png", "image/jpeg", "image/gif", "image/webp",
+    "application/pdf", "text/plain", "text/csv",
+}
+ALLOWED_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".txt", ".csv"}
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB per file — keeps uploads quick and
+# the on-disk footprint predictable. Bump here if you need larger receipts/scans.
+
+
+def _attachments_dir() -> Path:
+    """Return the attachments directory, creating it on first use. Lazy creation
+    means a fresh install (or a volume that was emptied) doesn't need a startup
+    hook — the first upload makes the directory."""
+    ATTACH_DIR.mkdir(parents=True, exist_ok=True)
+    return ATTACH_DIR
+
+
+def row_attachment(r) -> dict:
+    """Serialize one attachment row. The URLs are relative paths (no host) so
+    the frontend can prepend its API_BASE and honour the same proxy/origin
+    setup as every other request. `disposition=inline` opens in the browser
+    (image/PDF preview); `disposition=attachment` forces a download."""
+    mime = r["mime_type"] or "application/octet-stream"
+    aid = r["id"]
+    return {
+        "id": aid,
+        "filename": r["filename"],
+        "mime_type": mime,
+        "size_bytes": r["size_bytes"],
+        "is_image": mime.startswith("image/"),
+        "url": f"/api/attachments/{aid}?disposition=inline",
+        "download_url": f"/api/attachments/{aid}?disposition=attachment",
+        "created_at": r["created_at"],
+    }
+
+
+def attachment_counts_for(vehicle_id: int, entry_type: str) -> dict[int, int]:
+    """Return {entry_id: attachment_count} for one vehicle + entry type, in a
+    single query. Used by fuel_payload() and list_service() so the table views
+    can show a per-row paperclip badge without an N+1 follow-up per entry."""
+    rows = db.query(
+        "SELECT entry_id, COUNT(*) AS c FROM attachments"
+        " WHERE vehicle_id=? AND entry_type=? GROUP BY entry_id",
+        (vehicle_id, entry_type),
+    )
+    return {r["entry_id"]: r["c"] for r in rows}
+
+
+def _purge_attachment_files(rows) -> None:
+    """Unlink the on-disk files for a list of attachment rows. Missing files are
+    silently skipped (an orphaned row pointing at a deleted file is the worse
+    state, but we still remove the row elsewhere — this just avoids crashing)."""
+    d = _attachments_dir()
+    for r in rows:
+        try:
+            (d / r["stored_name"]).unlink()
+        except OSError:
+            pass
+
+
+def delete_attachments_for(entry_type: str, entry_id: int) -> None:
+    """Remove every attachment (file + row) for one fuel/service entry. Called
+    by the fuel/service delete routes so deleting an entry doesn't orphan its
+    files on disk."""
+    rows = db.query(
+        "SELECT * FROM attachments WHERE entry_type=? AND entry_id=?",
+        (entry_type, entry_id),
+    )
+    _purge_attachment_files(rows)
+    db.execute(
+        "DELETE FROM attachments WHERE entry_type=? AND entry_id=?",
+        (entry_type, entry_id),
+    )
+
+
+def delete_attachments_for_vehicle(vehicle_id: int) -> None:
+    """Remove every attachment (file + row) for a whole vehicle. Called by the
+    vehicle delete route before the ON DELETE CASCADE wipes the rows, because
+    the cascade can't unlink files on disk."""
+    rows = db.query("SELECT * FROM attachments WHERE vehicle_id=?", (vehicle_id,))
+    _purge_attachment_files(rows)
+    db.execute("DELETE FROM attachments WHERE vehicle_id=?", (vehicle_id,))
+
+
+def _validate_upload(file: UploadFile) -> tuple[str, str]:
+    """Return (mime_type, extension) for an upload, rejecting anything that
+    isn't on the allowlist. We check BOTH the extension and the mime type: the
+    extension is the source of truth for the on-disk filename, and the mime
+    type is what we serve back, so both must be allowed. When the browser sends
+    a generic application/octet-stream (common for .pdf / .csv), we fall back to
+    mimetypes.guess_type() on the filename and accept that if it's allowed."""
+    original = file.filename or ""
+    ext = Path(original).suffix.lower()
+    mime = (file.content_type or "").split(";")[0].strip().lower()
+    if mime not in ALLOWED_MIME:
+        guess, _ = mimetypes.guess_type(original)
+        mime = (guess or "").lower()
+    if ext not in ALLOWED_EXT or mime not in ALLOWED_MIME:
+        raise HTTPException(
+            415, "Unsupported file type. Use an image, PDF, TXT or CSV."
+        )
+    return mime, ext
+
+
+@app.get("/api/attachments")
+def list_attachments(
+    entry_type: str = Query(..., pattern="^(fuel|service)$"),
+    entry_id: int = Query(...),
+):
+    """List attachments for one fuel/service entry. Returns metadata + URLs; the
+    file bytes themselves are served by GET /api/attachments/{aid}."""
+    rows = db.query(
+        "SELECT * FROM attachments WHERE entry_type=? AND entry_id=? ORDER BY id",
+        (entry_type, entry_id),
+    )
+    return [row_attachment(r) for r in rows]
+
+
+@app.post("/api/attachments", status_code=201)
+async def create_attachment(
+    file: UploadFile = File(...),
+    entry_type: str = Form(..., pattern="^(fuel|service)$"),
+    entry_id: int = Form(...),
+    vehicle_id: int = Form(...),
+):
+    """Upload one file and attach it to a fuel or service entry.
+
+    The entry must already exist (the frontend creates the entry first, then
+    uploads attachments), so we validate the (entry_type, entry_id, vehicle_id)
+    triple belongs to a real entry of the right type — that prevents attaching
+    a file to a phantom id, and ensures the attachment is bound to the correct
+    vehicle.
+    """
+    # Verify the owning entry exists and belongs to the named vehicle.
+    if entry_type == "fuel":
+        row = db.one("SELECT vehicle_id FROM fuel_entries WHERE id=?", (entry_id,))
+    else:
+        row = db.one("SELECT vehicle_id FROM service_entries WHERE id=?", (entry_id,))
+    if row is None:
+        raise HTTPException(404, "entry not found")
+    if row["vehicle_id"] != vehicle_id:
+        raise HTTPException(422, "entry does not belong to this vehicle")
+
+    mime, ext = _validate_upload(file)
+
+    # Read into memory to enforce the size cap before writing to disk. 25 MB is
+    # small enough that buffering is fine and keeps the code simple; we avoid
+    # streaming-to-disk-then-truncating, which would leave a partial file behind
+    # on an oversize upload.
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "File too large. Maximum 25 MB.")
+
+    stored_name = f"{uuid.uuid4().hex}{ext}"
+    (_attachments_dir() / stored_name).write_bytes(data)
+
+    aid = db.execute(
+        "INSERT INTO attachments (vehicle_id, entry_type, entry_id, filename, stored_name, mime_type, size_bytes)"
+        " VALUES (?,?,?,?,?,?,?)",
+        (vehicle_id, entry_type, entry_id, file.filename or stored_name, stored_name, mime, len(data)),
+    )
+    return row_attachment(db.one("SELECT * FROM attachments WHERE id=?", (aid,)))
+
+
+@app.get("/api/attachments/{aid}")
+def get_attachment(
+    aid: int,
+    disposition: str = Query("inline", pattern="^(inline|attachment)$"),
+):
+    """Serve an attachment's bytes. `disposition=inline` opens in the browser
+    (image/PDF preview in a new tab); `disposition=attachment` forces a
+    download with the original filename. The filename is RFC 5987-encoded so
+    non-ASCII names survive the Content-Disposition header intact."""
+    r = db.one("SELECT * FROM attachments WHERE id=?", (aid,))
+    if r is None:
+        raise HTTPException(404, "attachment not found")
+    path = _attachments_dir() / r["stored_name"]
+    if not path.is_file():
+        raise HTTPException(404, "attachment file missing")
+    media = r["mime_type"] or "application/octet-stream"
+    fname = r["filename"] or r["stored_name"]
+    # RFC 5987: filename*=UTF-8''<percent-encoded> is understood by every modern
+    # browser and handles unicode safely. We also send an ASCII filename= as a
+    # fallback for very old clients.
+    ascii_fallback = fname.encode("ascii", "ignore").decode("ascii") or "attachment"
+    content_disposition = (
+        f"{disposition}; filename=\"{ascii_fallback.replace(chr(34), '')}\"; "
+        f"filename*=UTF-8''{quote(fname)}"
+    )
+    return FileResponse(
+        str(path),
+        media_type=media,
+        headers={"Content-Disposition": content_disposition},
+    )
+
+
+@app.delete("/api/attachments/{aid}")
+def delete_attachment(aid: int):
+    """Remove one attachment: unlink its file on disk and delete the row. Used
+    by the per-attachment trash button in the edit modal."""
+    r = db.one("SELECT * FROM attachments WHERE id=?", (aid,))
+    if r is None:
+        raise HTTPException(404, "attachment not found")
+    try:
+        (_attachments_dir() / r["stored_name"]).unlink()
+    except OSError:
+        pass
+    db.execute("DELETE FROM attachments WHERE id=?", (aid,))
+    return {"deleted": aid}
 
 
 # ---------------------------------------------------------------------------

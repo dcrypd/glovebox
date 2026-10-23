@@ -2,3 +2,5 @@ fastapi>=0.115
 uvicorn>=0.30
 reportlab>=4.2
 qrcode>=7.4
+# Required by FastAPI to parse multipart/form-data uploads (file attachments).
+python-multipart>=0.0.9

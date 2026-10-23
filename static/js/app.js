@@ -87,6 +87,14 @@ const fmtMoney = (v, cur = '$') => v == null ? '—' : cur + Number(v).toLocaleS
 const fmtNum = (v, d = 1) => v == null ? '—' : Number(v).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 const fmtInt = v => v == null ? '—' : Number(v).toLocaleString('en-US');
 const fmtDate = iso => iso ? new Date(iso + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+// Human-readable file size for attachment chips. B / KB / MB only — attachments
+// are capped at 25 MB on the server, so GB+ is never needed.
+function fmtSize(bytes) {
+  if (bytes == null) return '—';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
 
 function vLabel() {
   // Return the currently selected vehicle's record (or a default gas-US
@@ -96,6 +104,10 @@ function vLabel() {
   return v || { currency: '$', distance_unit: 'mi', fuel_unit: 'gal' };
 }
 const FUEL_UNIT_LABELS = { gal: 'gal', l: 'L', gal_uk: 'imp gal', kwh: 'kWh' };
+// File types accepted by the attachment picker. Mirrors the server's allowlist
+// (ALLOWED_MIME / ALLOWED_EXT in app/main.py) so the OS file dialog only offers
+// selectable types; the server still validates, so a bypassed picker is safe.
+const ATTACH_ACCEPT = '.png,.jpg,.jpeg,.gif,.webp,.pdf,.txt,.csv,image/*,application/pdf,text/plain,text/csv';
 const dUnit = () => vLabel().distance_unit === 'km' ? 'km' : 'mi';
 const fUnit = () => FUEL_UNIT_LABELS[vLabel().fuel_unit] || 'gal';
 const isElectric = (v) => (v || vLabel()).fuel_type === 'electric';
@@ -493,6 +505,8 @@ const ICONS = {
   trash: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
   qr: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3"/><path d="M21 14v.01"/><path d="M14 21h3"/><path d="M21 18v3"/><path d="M18 18v.01"/></svg>',
   print: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8" rx="1"/></svg>',
+  paperclip: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>',
+  file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
 };
 
 function emptyState(icon, title, text, action) {
@@ -693,7 +707,7 @@ async function renderFuel(view) {
       </tr></thead>
       <tbody>${rows.map(e => `
         <tr>
-          <td>${fmtDate(e.date)}</td>
+          <td>${fmtDate(e.date)}${attachBadgeHtml(e.attachment_count)}</td>
           <td class="num mono">${fmtInt(e.odometer)}</td>
           <td class="num mono">${fmtNum(e.quantity, 3)}</td>
           <td class="num mono">${fmtMoney(e.cost, v.currency)}</td>
@@ -734,7 +748,7 @@ async function renderService(view) {
       <thead><tr><th>Date</th><th class="num">Odometer</th><th>Description</th><th>Category</th><th class="num">Cost</th><th></th></tr></thead>
       <tbody>${rows.map(e => `
         <tr>
-          <td>${fmtDate(e.date)}</td>
+          <td>${fmtDate(e.date)}${attachBadgeHtml(e.attachment_count)}</td>
           <td class="num mono">${e.odometer == null ? '—' : fmtInt(e.odometer)}</td>
           <td class="wrap">${esc(e.description)}${e.notes ? `<div class="faint" style="font-size:var(--text-xs)">${esc(e.notes)}</div>` : ''}</td>
           <td><span class="badge badge-cat">${esc(e.category)}</span></td>
@@ -984,10 +998,15 @@ async function offerServiceRecord(rem) {
       + serviceFormHtml({ date: todayISO(), odometer, description: rem.title, category: 'service', notes: rem.notes }),
     `<button class="btn" data-action="done-reminder-only" data-id="${rem.id}">Just mark done</button><button class="btn btn-primary" data-type="save" form="modal-form">Save &amp; mark done</button>`
   );
-  submitModal(async d => {
-    await api(`/vehicles/${state.vid}/service`, { method: 'POST', body: cleanService(d) });
+  submitModal(async (d, form) => {
+    // Create the service record (JSON), upload any chosen attachments to it by
+    // id, then complete the reminder. Upload failures are non-fatal — the
+    // record + reminder completion still go through; we just flag the count.
+    const sr = await api(`/vehicles/${state.vid}/service`, { method: 'POST', body: cleanService(d) });
+    const errs = await uploadAttachments(form, 'service', sr.id, state.vid);
     const res = await api(`/reminders/${rem.id}/complete`, { method: 'POST' });
-    toast(res.recurring ? 'Record saved · rescheduled for next interval' : 'Record saved · reminder done');
+    const base = res.recurring ? 'Record saved · rescheduled for next interval' : 'Record saved · reminder done';
+    toast(errs.length ? `${base} · ${errs.length} attachment(s) failed` : base, errs.length > 0);
     render();
   });
 }
@@ -1072,9 +1091,15 @@ function openAddFuelModal() {
   modal(addLabel, fuelFormHtml(null),
     `<button class="btn" data-close-modal>Cancel</button><button class="btn btn-primary" data-type="save" form="modal-form">Save</button>`,
     { extraHeadActions: qrBtn });
-  submitModal(async d => {
-    await api(`/vehicles/${state.vid}/fuel`, { method: 'POST', body: cleanFuel(d) });
-    toast(isElectric() ? 'Charge saved' : 'Fill-up saved');
+  submitModal(async (d, form) => {
+    // Create the entry first (JSON), then upload any chosen attachments to it
+    // by id. Upload failures are non-fatal — the entry is already saved, so we
+    // surface a warning toast rather than leaving the modal open (which would
+    // risk a duplicate entry on a second Save click).
+    const res = await api(`/vehicles/${state.vid}/fuel`, { method: 'POST', body: cleanFuel(d) });
+    const errs = await uploadAttachments(form, 'fuel', res.id, state.vid);
+    if (errs.length) toast(`Saved · ${errs.length} attachment(s) failed`, true);
+    else toast(isElectric() ? 'Charge saved' : 'Fill-up saved');
     render();
   });
 }
@@ -1136,6 +1161,117 @@ function vehicleFormHtml(v) {
     ${hint}`;
 }
 
+/* ------------------------------------------------------------------ attachments */
+/* Per-entry file attachments (receipts, photos, PDFs). The file picker lives
+ * inside the fuel/service forms; on save, the entry is created/updated first
+ * (JSON), then each chosen file is uploaded separately (multipart) to
+ * /api/attachments with the entry's id. In edit mode, the existing attachments
+ * are listed above the picker with open / download / remove actions.
+ *
+ * The upload is non-fatal: if the entry save succeeds but one or more uploads
+ * fail, we still close the modal and surface a warning toast — the entry itself
+ * is persisted, and the user can re-attach the failed files via Edit. This
+ * avoids the "click Save again → duplicate entry" trap.
+ */
+
+function attachmentsFieldHtml(entryType, entry) {
+  // The picker is always shown; in edit mode an existing-attachments list is
+  // rendered above it (populated asynchronously by refreshAttachments, because
+  // modal() builds its HTML synchronously). isEdit requires a real entry id —
+  // offerServiceRecord() passes a pre-filled-but-new object (no id) which must
+  // be treated as "add", not "edit", so it doesn't try to load attachments for
+  // a phantom entry_id.
+  const isEdit = !!(entry && entry.id);
+  const list = isEdit
+    ? `<div class="attach-list" id="attach-list" data-entry-type="${entryType}" data-entry-id="${entry.id}"><p class="field-hint">Loading attachments…</p></div>`
+    : '';
+  return `
+    <div class="field attach-field">
+      <label for="af-files">Attachments (optional)</label>
+      ${list}
+      <input id="af-files" name="attachments" type="file" multiple accept="${ATTACH_ACCEPT}">
+      <p class="field-hint">Images, PDFs, TXT or CSV · up to 25 MB each.</p>
+    </div>`;
+}
+
+function attachBadgeHtml(count) {
+  // The small paperclip + count shown next to a row's date when it has
+  // attachments. Returns '' for zero so rows without attachments stay clean.
+  if (!count) return '';
+  return ` <span class="attach-badge" title="${count} attachment${count === 1 ? '' : 's'}">${ICONS.paperclip}<span class="attach-count">${count}</span></span>`;
+}
+
+function attachItemHtml(a) {
+  // One attachment chip: thumbnail (images) or file icon (PDF/text), the
+  // original filename + size, and open / download / remove actions. "Open"
+  // and the thumbnail/name link to disposition=inline (browser preview in a
+  // new tab); the download icon links to disposition=attachment.
+  const view = API_BASE + a.url;
+  const dl = API_BASE + a.download_url;
+  const preview = a.is_image
+    ? `<a href="${esc(view)}" target="_blank" rel="noopener" class="attach-thumb"><img src="${esc(view)}" alt="${esc(a.filename)}" loading="lazy"></a>`
+    : `<a href="${esc(view)}" target="_blank" rel="noopener" class="attach-icon" aria-label="Open ${esc(a.filename)}">${ICONS.file}</a>`;
+  return `
+  <div class="attach-chip">
+    ${preview}
+    <div class="attach-meta">
+      <a href="${esc(view)}" target="_blank" rel="noopener" class="attach-name" title="${esc(a.filename)}">${esc(a.filename)}</a>
+      <span class="attach-size">${fmtSize(a.size_bytes)}</span>
+    </div>
+    <div class="attach-actions">
+      <a class="icon-btn" href="${esc(dl)}" download title="Download">${ICONS.download}</a>
+      <button class="icon-btn" type="button" data-action="del-attachment" data-id="${a.id}" title="Remove">${ICONS.trash}</button>
+    </div>
+  </div>`;
+}
+
+async function refreshAttachments(entryType, entryId) {
+  // Populate the #attach-list inside an open edit modal. No-op if the modal has
+  // already closed (the list element is gone) — this makes it safe to call
+  // right after modal() even if a faster user action dismissed it.
+  const list = $('#attach-list');
+  if (!list) return;
+  try {
+    const items = await api(`/attachments?entry_type=${entryType}&entry_id=${entryId}`);
+    list.innerHTML = items.length
+      ? items.map(attachItemHtml).join('')
+      : '<p class="field-hint">No attachments yet.</p>';
+  } catch {
+    list.innerHTML = '<p class="field-hint">Could not load attachments.</p>';
+  }
+}
+
+async function uploadAttachments(form, entryType, entryId, vehicleId) {
+  // Upload every file in the picker, one request per file (multipart/form-data).
+  // Returns an array of per-file error messages rather than throwing, so the
+  // caller can finish closing the modal and surface a warning toast — the entry
+  // itself is already saved by the time we get here.
+  const input = form.querySelector('#af-files');
+  if (!input || !input.files || !input.files.length) return [];
+  const errors = [];
+  for (const file of input.files) {
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('entry_type', entryType);
+      fd.append('entry_id', String(entryId));
+      fd.append('vehicle_id', String(vehicleId));
+      const res = await fetch(API_BASE + '/api/attachments', { method: 'POST', body: fd });
+      if (!res.ok) {
+        let detail = `Upload failed (${res.status})`;
+        try { const j = await res.json(); detail = typeof j.detail === 'string' ? j.detail : detail; } catch {}
+        errors.push(`${file.name}: ${detail}`);
+      }
+    } catch (e) {
+      errors.push(`${file.name}: ${e.message}`);
+    }
+  }
+  // Clear the picker so a re-submit (e.g. the user fixes a validation error and
+  // saves again) doesn't re-upload the same files as duplicates.
+  input.value = '';
+  return errors;
+}
+
 function fuelFormHtml(e) {
   const v = vLabel();
   const t = evTerms(v);
@@ -1160,7 +1296,8 @@ function fuelFormHtml(e) {
       <label for="ff-missed">${t.missedLabel}</label>
     </div>
     <p class="field-hint">${t.missedHint}</p>
-    <div class="field"><label for="ff-notes">Notes (optional)</label><textarea id="ff-notes" name="notes" rows="2">${esc(e?.notes ?? '')}</textarea></div>`;
+    <div class="field"><label for="ff-notes">Notes (optional)</label><textarea id="ff-notes" name="notes" rows="2">${esc(e?.notes ?? '')}</textarea></div>
+    ${attachmentsFieldHtml('fuel', e)}`;
 }
 
 function serviceFormHtml(e) {
@@ -1178,7 +1315,8 @@ function serviceFormHtml(e) {
         </select></div>
       <div class="field"><label for="sf-cost">Cost (optional)</label><input id="sf-cost" name="cost" type="number" step="0.01" min="0" placeholder="75.00" value="${e?.cost ?? ''}"></div>
     </div>
-    <div class="field"><label for="sf-notes">Notes (optional)</label><textarea id="sf-notes" name="notes" rows="2">${esc(e?.notes ?? '')}</textarea></div>`;
+    <div class="field"><label for="sf-notes">Notes (optional)</label><textarea id="sf-notes" name="notes" rows="2">${esc(e?.notes ?? '')}</textarea></div>
+    ${attachmentsFieldHtml('service', e)}`;
 }
 
 function reminderFormHtml(r) {
@@ -1320,9 +1458,15 @@ document.addEventListener('click', async ev => {
       const e = state.data.fuel.entries.find(x => x.id === id);
       modal(isElectric() ? 'Edit charging session' : 'Edit fill-up', fuelFormHtml(e),
         `<button class="btn" data-close-modal>Cancel</button><button class="btn btn-primary" data-type="save" form="modal-form">Save</button>`);
-      submitModal(async d => {
+      // Populate the existing-attachments list (the form HTML rendered a
+      // placeholder #attach-list). Removing an attachment updates this list
+      // in place via refreshAttachments(); new files are uploaded on Save.
+      refreshAttachments('fuel', id);
+      submitModal(async (d, form) => {
         await api(`/fuel/${id}`, { method: 'PATCH', body: cleanFuel(d) });
-        toast(isElectric() ? 'Charge updated' : 'Fill-up updated');
+        const errs = await uploadAttachments(form, 'fuel', id, state.vid);
+        if (errs.length) toast(`Saved · ${errs.length} attachment(s) failed`, true);
+        else toast(isElectric() ? 'Charge updated' : 'Fill-up updated');
         render();
       });
     } else if (action === 'del-fuel') {
@@ -1337,18 +1481,23 @@ document.addEventListener('click', async ev => {
     } else if (action === 'add-service') {
       modal('Add record', serviceFormHtml(null),
         `<button class="btn" data-close-modal>Cancel</button><button class="btn btn-primary" data-type="save" form="modal-form">Save</button>`);
-      submitModal(async d => {
-        await api(`/vehicles/${state.vid}/service`, { method: 'POST', body: cleanService(d) });
-        toast('Record saved');
+      submitModal(async (d, form) => {
+        const res = await api(`/vehicles/${state.vid}/service`, { method: 'POST', body: cleanService(d) });
+        const errs = await uploadAttachments(form, 'service', res.id, state.vid);
+        if (errs.length) toast(`Saved · ${errs.length} attachment(s) failed`, true);
+        else toast('Record saved');
         render();
       });
     } else if (action === 'edit-service') {
       const e = state.data.service.find(x => x.id === id);
       modal('Edit record', serviceFormHtml(e),
         `<button class="btn" data-close-modal>Cancel</button><button class="btn btn-primary" data-type="save" form="modal-form">Save</button>`);
-      submitModal(async d => {
+      refreshAttachments('service', id);
+      submitModal(async (d, form) => {
         await api(`/service/${id}`, { method: 'PATCH', body: cleanService(d) });
-        toast('Record updated');
+        const errs = await uploadAttachments(form, 'service', id, state.vid);
+        if (errs.length) toast(`Saved · ${errs.length} attachment(s) failed`, true);
+        else toast('Record updated');
         render();
       });
     } else if (action === 'del-service') {
@@ -1358,6 +1507,15 @@ document.addEventListener('click', async ev => {
       closeModal();
       toast('Record deleted');
       render();
+    } else if (action === 'del-attachment') {
+      // Remove one attachment from inside an open edit modal. The entry itself
+      // is untouched; we just refresh #attach-list so the chip disappears. The
+      // table's paperclip badge updates on the next render() (when the modal
+      // closes and the view re-fetches).
+      await api(`/attachments/${id}`, { method: 'DELETE' });
+      toast('Attachment removed');
+      const list = $('#attach-list');
+      if (list) await refreshAttachments(list.dataset.entryType, Number(list.dataset.entryId));
     } else if (action === 'add-reminder') {
       modal('Add reminder', reminderFormHtml(null),
         `<button class="btn" data-close-modal>Cancel</button><button class="btn btn-primary" data-type="save" form="modal-form">Save</button>`);

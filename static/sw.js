@@ -8,7 +8,7 @@
  *
  * Bump VERSION when you change the precache list.
  */
-const VERSION = 'glovebox-v5';
+const VERSION = 'glovebox-v1.0.1';
 // Cache namespace. Bump this when the precache list below changes, or
 // when app.js / styles.css ship breaking changes — the activate handler
 // deletes any cache that doesn't match VERSION, so old shells are evicted on
